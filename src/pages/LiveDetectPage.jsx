@@ -201,11 +201,16 @@ const LiveDetectPage = () => {
       hands.onResults((results) => {
         const canvas = canvasRef.current;
         const vid    = videoRef.current;
-        if (!canvas || !vid) return;
+        if (!canvas || !vid) {
+          console.warn("Canvas or video ref missing");
+          return;
+        }
 
         const ctx = canvas.getContext("2d");
         canvas.width  = vid.videoWidth  || 640;
         canvas.height = vid.videoHeight || 480;
+
+        console.log(`Drawing frame: ${canvas.width}x${canvas.height}`);
 
         ctx.save();
         ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -347,7 +352,7 @@ const LiveDetectPage = () => {
           width: 100%; height: 100%; object-fit: cover;
         }
         .ld-video-inner video  { z-index: 1; opacity: 0; }
-        .ld-video-inner canvas { z-index: 2; }
+        .ld-video-inner canvas { z-index: 2; background: #060a12; }
 
         .ld-placeholder {
           position: absolute; inset: 0; z-index: 3;
