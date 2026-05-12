@@ -256,19 +256,43 @@ const LiveDetectPage = () => {
             ctx.save();
             ctx.translate(canvas.width, 0);
             ctx.scale(-1, 1);
-            if (window.drawConnectors) {
+            
+            // Draw hand connections
+            if (window.drawConnectors && window.HAND_CONNECTIONS) {
               window.drawConnectors(ctx, lm, window.HAND_CONNECTIONS, { color: "#00f5ff", lineWidth: 2 });
             } else {
-              console.warn("drawConnectors not available");
+              console.warn("drawConnectors or HAND_CONNECTIONS not available");
+              // Manual fallback: draw simple lines between landmarks
+              ctx.strokeStyle = "#00f5ff";
+              ctx.lineWidth = 2;
+              // Draw palm
+              const palmIndices = [[0,1],[1,2],[2,5],[5,9],[9,13],[13,17],[17,0]];
+              palmIndices.forEach(([a,b]) => {
+                ctx.beginPath();
+                ctx.moveTo(lm[a].x * canvas.width, lm[a].y * canvas.height);
+                ctx.lineTo(lm[b].x * canvas.width, lm[b].y * canvas.height);
+                ctx.stroke();
+              });
             }
+            
+            // Draw landmarks
             if (window.drawLandmarks) {
               window.drawLandmarks(ctx, lm, { color: "#ff4fa3", lineWidth: 1, radius: 4 });
             } else {
               console.warn("drawLandmarks not available");
+              // Manual fallback: draw circles for each landmark
+              ctx.fillStyle = "#ff4fa3";
+              lm.forEach(point => {
+                ctx.beginPath();
+                ctx.arc(point.x * canvas.width, point.y * canvas.height, 4, 0, 2 * Math.PI);
+                ctx.fill();
+              });
             }
+            
             ctx.restore();
 
             const letter = detectGesture(lm);
+            console.log(`Detected gesture: ${letter || 'none'}`);
             setGestureText(letter || "—");
             setMeaningText(letter ? (MEANINGS[letter] ?? `Letter ${letter}`) : "Detecting…");
             tryAddLetter(letter);
