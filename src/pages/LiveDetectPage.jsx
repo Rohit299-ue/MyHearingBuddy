@@ -3,29 +3,144 @@ import { useApp } from "../context/AppContext";
 
 // ─── Gesture Engine ───────────────────────────────────────────────────────────
 const detectGesture = (lm) => {
+  // Helper functions
   const up = (tip, pip) => lm[tip].y < lm[pip].y;
-  const thumbOpen = lm[4].x < lm[3].x;
+  const down = (tip, pip) => lm[tip].y > lm[pip].y;
+  const distance = (a, b) => Math.sqrt(Math.pow(lm[a].x - lm[b].x, 2) + Math.pow(lm[a].y - lm[b].y, 2));
+  
+  // Thumb (right hand: x increases left, left hand: x increases right)
+  const thumbOpen = lm[4].x < lm[3].x; // Works for right hand
+  const thumbClosed = !thumbOpen;
+  const thumbUp = up(4, 2);
+  
+  // Fingers extended/curled
   const index  = up(8,  6);
   const middle = up(12, 10);
   const ring   = up(16, 14);
   const pinky  = up(20, 18);
-  const allCurled = !index && !middle && !ring && !pinky;
-  const allUp     =  index &&  middle &&  ring &&  pinky;
-
-  if (allCurled && !thumbOpen) return "A";
-  if (allUp && !thumbOpen)     return "B";
-  if (index && !middle && !ring && !pinky && thumbOpen)  return "L";
-  if (!index && !middle && !ring && pinky && thumbOpen)  return "Y";
-  if (index &&  middle && !ring && !pinky) return "V";
-  if (index &&  middle &&  ring && !pinky) return "W";
-  if (!index && !middle && !ring &&  pinky && !thumbOpen) return "I";
-  if (index && !middle && !ring && !pinky && !thumbOpen)  return "D";
+  
+  const indexCurled  = !index;
+  const middleCurled = !middle;
+  const ringCurled   = !ring;
+  const pinkyCurled  = !pinky;
+  
+  // Common patterns
+  const allCurled = indexCurled && middleCurled && ringCurled && pinkyCurled;
+  const allUp     = index && middle && ring && pinky;
+  const onlyIndex = index && middleCurled && ringCurled && pinkyCurled;
+  const onlyPinky = indexCurled && middleCurled && ringCurled && pinky;
+  
+  // Finger proximity checks
+  const indexMiddleClose = distance(8, 12) < 0.05;
+  const thumbIndexClose = distance(4, 8) < 0.05;
+  
+  // A - Fist with thumb on side
+  if (allCurled && thumbClosed) return "A";
+  
+  // B - Flat hand, fingers up, thumb across palm
+  if (allUp && thumbClosed) return "B";
+  
+  // C - Curved hand (all fingers curved)
+  if (allCurled && thumbOpen && distance(4, 8) > 0.1 && distance(4, 8) < 0.2) return "C";
+  
+  // D - Index up, others curled, thumb touches middle
+  if (onlyIndex && thumbOpen && distance(4, 12) < 0.08) return "D";
+  
+  // E - All fingers curled, thumb curled over
+  if (allCurled && thumbClosed && lm[4].y > lm[8].y) return "E";
+  
+  // F - Index and thumb form circle, others up
+  if (thumbIndexClose && middle && ring && pinky) return "F";
+  
+  // G - Index pointing sideways, thumb up
+  if (index && middleCurled && ringCurled && pinkyCurled && thumbUp) return "G";
+  
+  // H - Index and middle pointing sideways, others curled
+  if (index && middle && ringCurled && pinkyCurled && thumbClosed) return "H";
+  
+  // I - Pinky up, others curled
+  if (onlyPinky && thumbClosed) return "I";
+  
+  // J - Pinky up with motion (same as I for static detection)
+  // (J requires motion, so we'll detect it as I in static mode)
+  
+  // K - Index and middle up in V, thumb touches middle
+  if (index && middle && ringCurled && pinkyCurled && thumbOpen && distance(4, 12) < 0.1) return "K";
+  
+  // L - Index up, thumb out at 90 degrees
+  if (onlyIndex && thumbOpen && Math.abs(lm[4].x - lm[8].x) > 0.1) return "L";
+  
+  // M - Three fingers over thumb (index, middle, ring curled over thumb)
+  if (indexCurled && middleCurled && ringCurled && pinkyCurled && thumbClosed && lm[8].y < lm[4].y) return "M";
+  
+  // N - Two fingers over thumb (index, middle curled over thumb)
+  if (indexCurled && middleCurled && ringCurled && pinkyCurled && thumbClosed && lm[8].y < lm[12].y) return "N";
+  
+  // O - All fingers form circle with thumb
+  if (thumbIndexClose && middleCurled && ringCurled && pinkyCurled && distance(4, 12) < 0.1) return "O";
+  
+  // P - Index down, middle out, thumb between
+  if (down(8, 6) && middle && ringCurled && pinkyCurled && thumbOpen) return "P";
+  
+  // Q - Index and thumb pointing down
+  if (down(8, 6) && down(4, 2) && middleCurled && ringCurled && pinkyCurled) return "Q";
+  
+  // R - Index and middle crossed
+  if (index && middle && ringCurled && pinkyCurled && indexMiddleClose) return "R";
+  
+  // S - Fist with thumb across fingers
+  if (allCurled && thumbClosed && lm[4].y < lm[8].y) return "S";
+  
+  // T - Thumb between index and middle
+  if (indexCurled && middleCurled && ringCurled && pinkyCurled && thumbUp && lm[4].y < lm[8].y) return "T";
+  
+  // U - Index and middle up together
+  if (index && middle && ringCurled && pinkyCurled && !indexMiddleClose && thumbClosed) return "U";
+  
+  // V - Index and middle up in V shape
+  if (index && middle && ringCurled && pinkyCurled && !indexMiddleClose && thumbOpen) return "V";
+  
+  // W - Three fingers up (index, middle, ring)
+  if (index && middle && ring && pinkyCurled) return "W";
+  
+  // X - Index bent at knuckle (hook shape)
+  if (indexCurled && middleCurled && ringCurled && pinkyCurled && thumbOpen && lm[8].y < lm[5].y) return "X";
+  
+  // Y - Thumb and pinky out
+  if (onlyPinky && thumbOpen && Math.abs(lm[4].x - lm[20].x) > 0.15) return "Y";
+  
+  // Z - Index pointing, making Z motion (same as pointing for static)
+  if (onlyIndex && thumbClosed && !thumbUp) return "Z";
+  
   return "";
 };
 
 const MEANINGS = {
-  A:"Letter A", B:"Letter B", D:"Letter D", I:"Letter I",
-  L:"Letter L", V:"Victory/Peace", W:"Letter W", Y:"Letter Y",
+  A: "Letter A - Fist",
+  B: "Letter B - Flat Hand",
+  C: "Letter C - Curved Hand",
+  D: "Letter D - Pointing Up",
+  E: "Letter E - Closed Fist",
+  F: "Letter F - OK Sign",
+  G: "Letter G - Pointing Side",
+  H: "Letter H - Two Fingers Side",
+  I: "Letter I - Pinky Up",
+  K: "Letter K - Two Fingers",
+  L: "Letter L - L Shape",
+  M: "Letter M - Three Over Thumb",
+  N: "Letter N - Two Over Thumb",
+  O: "Letter O - Circle",
+  P: "Letter P - Pointing Down",
+  Q: "Letter Q - Pointing Down",
+  R: "Letter R - Crossed Fingers",
+  S: "Letter S - Fist",
+  T: "Letter T - Thumb Between",
+  U: "Letter U - Two Up",
+  V: "Letter V - Peace Sign",
+  W: "Letter W - Three Up",
+  X: "Letter X - Hook",
+  Y: "Letter Y - Hang Loose",
+  Z: "Letter Z - Pointing",
 };
 
 // ─── Load MediaPipe scripts dynamically ──────────────────────────────────────
@@ -707,7 +822,8 @@ const LiveDetectPage = () => {
               1. Click 🔒 in address bar → Camera → <b>Allow</b><br />
               2. Refresh the page and try again<br />
               3. Close any app using your camera (Zoom, Teams…)<br /><br />
-              <b>Supported signs:</b> A · B · D · I · L · V · W · Y<br />
+              <b>Supported ASL signs:</b><br />
+              A-Z (All 26 letters of American Sign Language)<br />
               Hold each sign still — the bar fills as confidence builds.
             </div>
 
