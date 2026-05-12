@@ -1,228 +1,214 @@
 import { useRef, useState, useEffect, useCallback } from "react";
-import { Hands } from "@mediapipe/hands";
-import * as drawingUtils from "@mediapipe/drawing_utils";
 import { useApp } from "../context/AppContext";
 
-// ─── Gesture Engine ──────────────────────────────────────────────────────────
-
-/**
- * Returns normalised distance between two landmarks.
- */
-const dist = (a, b) =>
-  Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
-
-/**
- * Detect ASL-style letter from MediaPipe hand landmarks.
- * Landmarks: https://developers.google.com/mediapipe/solutions/vision/hand_landmarker
- */
+// ─── Gesture Engine ───────────────────────────────────────────────────────────
 const detectGesture = (lm) => {
-  // Helper: finger tip above its PIP joint (finger is "up")
   const up = (tip, pip) => lm[tip].y < lm[pip].y;
-
-  // Thumb: extended when tip is left of IP joint (right hand) or right (left hand)
-  // Use x-axis heuristic relative to wrist
-  const thumbOpen = lm[4].x < lm[3].x; // works for right hand facing camera
-
+  const thumbOpen = lm[4].x < lm[3].x;
   const index  = up(8,  6);
   const middle = up(12, 10);
   const ring   = up(16, 14);
   const pinky  = up(20, 18);
-
   const allCurled = !index && !middle && !ring && !pinky;
-  const allUp     = index && middle && ring && pinky;
+  const allUp     =  index &&  middle &&  ring &&  pinky;
 
-  // A — fist, thumb to side
   if (allCurled && !thumbOpen) return "A";
-
-  // B — all four fingers up, thumb tucked
-  if (allUp && !thumbOpen) return "B";
-
-  // C — curved hand (approximate: all fingers partially bent)
-  {
-    const curvature = (tip, pip, mcp) =>
-      lm[tip].y - lm[mcp].y; // negative = extended, positive = curled
-    const approxC =
-      !index && !middle && !ring && !pinky &&
-      dist(lm[4], lm[8]) < 0.15;
-    if (approxC) return "C";
-  }
-
-  // D — index up, others curled, thumb touches middle
-  if (index && !middle && !ring && !pinky && dist(lm[4], lm[12]) < 0.08)
-    return "D";
-
-  // E — all fingers curled, thumb tucked under
-  if (allCurled && dist(lm[4], lm[8]) < 0.06) return "E";
-
-  // F — index + thumb pinch, others up
-  if (!index && middle && ring && pinky && dist(lm[4], lm[8]) < 0.07)
-    return "F";
-
-  // I — pinky only up
-  if (!index && !middle && !ring && pinky) return "I";
-
-  // L — index up, thumb open, others curled
-  if (index && !middle && !ring && !pinky && thumbOpen) return "L";
-
-  // O — all fingers curve toward thumb (distance heuristic)
-  if (dist(lm[4], lm[8]) < 0.05 && !middle && !ring && !pinky) return "O";
-
-  // V — index + middle up, others down
-  if (index && middle && !ring && !pinky) return "V";
-
-  // W — index + middle + ring up
-  if (index && middle && ring && !pinky) return "W";
-
-  // Y — pinky + thumb out
-  if (!index && !middle && !ring && pinky && thumbOpen) return "Y";
-
+  if (allUp && !thumbOpen)     return "B";
+  if (index && !middle && !ring && !pinky && thumbOpen)  return "L";
+  if (!index && !middle && !ring && pinky && thumbOpen)  return "Y";
+  if (index &&  middle && !ring && !pinky) return "V";
+  if (index &&  middle &&  ring && !pinky) return "W";
+  if (!index && !middle && !ring &&  pinky && !thumbOpen) return "I";
+  if (index && !middle && !ring && !pinky && !thumbOpen)  return "D";
   return "";
 };
 
 const MEANINGS = {
-  A: "Letter A", B: "Letter B", C: "Letter C", D: "Letter D",
-  E: "Letter E", F: "Letter F", I: "Letter I", L: "Letter L",
-  O: "Letter O", V: "Victory / Peace", W: "Letter W", Y: "Letter Y",
+  A:"Letter A", B:"Letter B", D:"Letter D", I:"Letter I",
+  L:"Letter L", V:"Victory/Peace", W:"Letter W", Y:"Letter Y",
+};
+
+// ─── Load MediaPipe scripts dynamically ──────────────────────────────────────
+const CDN = "https://cdn.jsdelivr.net/npm/@mediapipe";
+
+const loadScript = (src) => new Promise((resolve, reject) => {
+  if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+  const s = document.createElement("script");
+  s.src = src; s.async = true;
+  s.onload = resolve;
+  s.onerror = () => reject(new Error(`Failed to load: ${src}`));
+  document.head.appendChild(s);
+});
+
+const loadMediaPipe = async () => {
+  // Load scripts sequentially (they depend on each other)
+  await loadScript(`${CDN}/drawing_utils/drawing_utils.js`);
+  await loadScript(`${CDN}/hands/hands.js`);
+
+  // Wait for Hands global to appear (up to 6 seconds)
+  for (let i = 0; i < 30; i++) {
+    if (window.Hands) return;
+    await new Promise(r => setTimeout(r, 200));
+  }
+  throw new Error("MediaPipe Hands did not initialize within 6 seconds. Check your network connection.");
 };
 
 // ─── Component ────────────────────────────────────────────────────────────────
-
 const LiveDetectPage = () => {
   const { addHistory } = useApp();
 
-  const videoRef    = useRef(null);
-  const canvasRef   = useRef(null);
-  const handsRef    = useRef(null);
-  const streamRef   = useRef(null);
-  const loopRef     = useRef(false);   // ← replaces stale isDetecting closure
-  const rafRef      = useRef(null);
+  const videoRef      = useRef(null);
+  const canvasRef     = useRef(null);
+  const handsRef      = useRef(null);
+  const streamRef     = useRef(null);
+  const loopRef       = useRef(false);
+  const rafRef        = useRef(null);
   const lastLetterRef = useRef("");
-  const holdCountRef  = useRef(0);     // debounce: require N consecutive frames
+  const holdCountRef  = useRef(0);
   const lastAddTime   = useRef(0);
 
-  const [isDetecting, setIsDetecting] = useState(false);
+  const [status, setStatus]         = useState("idle"); // idle | loading | active | error
+  const [loadStep, setLoadStep]     = useState("");
   const [gestureText, setGestureText] = useState("—");
   const [meaningText, setMeaningText] = useState("Show your hand to the camera");
-  const [word, setWord]               = useState("");
-  const [pulseActive, setPulseActive] = useState(false);
-  const [cameraError, setCameraError] = useState(null);
-  const [isLoading, setIsLoading]     = useState(false);
-  const [confidence, setConfidence]   = useState(0); // visual feedback
+  const [word, setWord]             = useState("");
+  const [pulse, setPulse]           = useState(false);
+  const [confidence, setConfidence] = useState(0);
+  const [errorMsg, setErrorMsg]     = useState("");
+  const [errorHint, setErrorHint]   = useState("");
 
-  // ── Gesture → word builder ────────────────────────────────────────────────
-  const addToWord = useCallback((letter) => {
-    if (!letter) { holdCountRef.current = 0; return; }
+  // ── letter builder ────────────────────────────────────────────────────────
+  const tryAddLetter = useCallback((letter) => {
+    if (!letter) { holdCountRef.current = 0; setConfidence(0); return; }
+    if (letter === lastLetterRef.current) holdCountRef.current++;
+    else { holdCountRef.current = 1; lastLetterRef.current = letter; }
 
-    const now = Date.now();
-    if (letter === lastLetterRef.current) {
-      holdCountRef.current += 1;
-    } else {
-      holdCountRef.current  = 1;
-      lastLetterRef.current = letter;
-    }
-
-    // Require 8 stable frames AND 800 ms gap before appending
-    if (holdCountRef.current === 8 && now - lastAddTime.current > 800) {
-      setWord((prev) => prev + letter);
-      lastAddTime.current = now;
-      setPulseActive(true);
-      setTimeout(() => setPulseActive(false), 400);
-    }
-
-    // Confidence bar: 0–100 based on hold count
     setConfidence(Math.min(100, (holdCountRef.current / 8) * 100));
+
+    if (holdCountRef.current === 8 && Date.now() - lastAddTime.current > 800) {
+      setWord(w => w + letter);
+      lastAddTime.current = Date.now();
+      setPulse(true);
+      setTimeout(() => setPulse(false), 400);
+    }
   }, []);
 
-  // ── Detection loop ────────────────────────────────────────────────────────
-  const runLoop = useCallback(async () => {
+  // ── detection loop ────────────────────────────────────────────────────────
+  const runLoop = useCallback(() => {
     if (!loopRef.current) return;
-
     const video = videoRef.current;
     const hands = handsRef.current;
-
     if (video && hands && video.readyState >= 2) {
-      try {
-        await hands.send({ image: video });
-      } catch {
-        // ignore transient frame errors
-      }
+      hands.send({ image: video }).catch(() => {});
     }
-
-    // Throttle to ~30 fps
-    rafRef.current = requestAnimationFrame(() => {
-      setTimeout(() => runLoop(), 33);
-    });
+    rafRef.current = requestAnimationFrame(() => setTimeout(runLoop, 33));
   }, []);
 
-  // ── Start camera ──────────────────────────────────────────────────────────
-  const startCamera = async () => {
+  // ── start ─────────────────────────────────────────────────────────────────
+  const start = async () => {
+    setStatus("loading");
+    setErrorMsg("");
+    setErrorHint("");
+
     try {
-      setIsLoading(true);
-      setCameraError(null);
+      // ── Step 1: Camera permission ─────────────────────────────────────────
+      setLoadStep("Requesting camera access…");
 
       if (!navigator.mediaDevices?.getUserMedia) {
-        throw Object.assign(new Error("Camera API not supported in this browser."), { name: "UnsupportedError" });
+        throw Object.assign(
+          new Error("Your browser does not support camera access. Please use Chrome, Firefox, or Edge."),
+          { userFacing: true }
+        );
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" },
-      });
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" },
+        });
+      } catch (err) {
+        const map = {
+          NotAllowedError:       "Camera permission was denied.\n→ Click the 🔒 lock in your address bar, set Camera to Allow, then refresh.",
+          PermissionDeniedError: "Camera permission was denied.\n→ Click the 🔒 lock in your address bar, set Camera to Allow, then refresh.",
+          NotFoundError:         "No camera found on this device.\n→ Plug in a webcam and try again.",
+          DevicesNotFoundError:  "No camera found on this device.\n→ Plug in a webcam and try again.",
+          NotReadableError:      "Camera is in use by another app (Zoom, Teams, OBS…).\n→ Close that app and try again.",
+          TrackStartError:       "Camera is in use by another app.\n→ Close that app and try again.",
+          OverconstrainedError:  "Camera doesn't support the requested settings. Trying again…",
+        };
+        throw Object.assign(
+          new Error(map[err.name] ?? `Camera failed to start: ${err.message}`),
+          { userFacing: true }
+        );
+      }
+
       streamRef.current = stream;
 
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await new Promise((res, rej) => {
-          videoRef.current.onloadedmetadata = () => videoRef.current.play().then(res).catch(rej);
-        });
-      }
+      // ── Step 2: Attach to video element ───────────────────────────────────
+      setLoadStep("Starting video stream…");
+      const video = videoRef.current;
+      video.srcObject = stream;
 
-      // Init MediaPipe Hands
-      const hands = new Hands({
-        locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`,
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("Video load timed out after 5 s.")), 5000);
+        video.onloadedmetadata = () => {
+          clearTimeout(timeout);
+          video.play().then(resolve).catch(reject);
+        };
       });
+
+      // ── Step 3: Load MediaPipe ────────────────────────────────────────────
+      setLoadStep("Downloading hand-tracking model…");
+      await loadMediaPipe();
+
+      // ── Step 4: Init Hands ────────────────────────────────────────────────
+      setLoadStep("Initialising detector…");
+      const hands = new window.Hands({
+        locateFile: (f) => `${CDN}/hands/${f}`,
+      });
+
       hands.setOptions({
         maxNumHands: 1,
         modelComplexity: 1,
         minDetectionConfidence: 0.75,
-        minTrackingConfidence: 0.75,
+        minTrackingConfidence:  0.75,
       });
 
       hands.onResults((results) => {
         const canvas = canvasRef.current;
-        const video  = videoRef.current;
-        if (!canvas || !video) return;
+        const vid    = videoRef.current;
+        if (!canvas || !vid) return;
 
         const ctx = canvas.getContext("2d");
-        canvas.width  = video.videoWidth  || 640;
-        canvas.height = video.videoHeight || 480;
+        canvas.width  = vid.videoWidth  || 640;
+        canvas.height = vid.videoHeight || 480;
 
         ctx.save();
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-        // Mirror flip so it feels natural
+        // Mirror the feed so it feels like a selfie camera
         ctx.translate(canvas.width, 0);
         ctx.scale(-1, 1);
         ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
         ctx.restore();
 
         if (results.multiHandLandmarks?.length) {
-          for (const landmarks of results.multiHandLandmarks) {
-            // Mirror-adjusted drawing
+          for (const lm of results.multiHandLandmarks) {
+            // Draw landmarks mirrored
             ctx.save();
             ctx.translate(canvas.width, 0);
             ctx.scale(-1, 1);
-            drawingUtils.drawConnectors(ctx, landmarks, Hands.HAND_CONNECTIONS, {
-              color: "#00f5ff", lineWidth: 2,
-            });
-            drawingUtils.drawLandmarks(ctx, landmarks, {
-              color: "#ff4fa3", lineWidth: 1, radius: 4,
-            });
+            if (window.drawConnectors) {
+              window.drawConnectors(ctx, lm, window.HAND_CONNECTIONS, { color: "#00f5ff", lineWidth: 2 });
+            }
+            if (window.drawLandmarks) {
+              window.drawLandmarks(ctx, lm, { color: "#ff4fa3", lineWidth: 1, radius: 4 });
+            }
             ctx.restore();
 
-            const letter = detectGesture(landmarks);
+            const letter = detectGesture(lm);
             setGestureText(letter || "—");
-            setMeaningText(letter ? MEANINGS[letter] ?? `Letter ${letter}` : "Detecting…");
-            addToWord(letter);
+            setMeaningText(letter ? (MEANINGS[letter] ?? `Letter ${letter}`) : "Detecting…");
+            tryAddLetter(letter);
           }
         } else {
           setGestureText("—");
@@ -234,41 +220,41 @@ const LiveDetectPage = () => {
 
       handsRef.current = hands;
       loopRef.current  = true;
-      setIsDetecting(true);
-      setIsLoading(false);
+      setStatus("active");
+      setLoadStep("");
       runLoop();
 
     } catch (err) {
-      setIsLoading(false);
-      const msgs = {
-        NotAllowedError:      "Camera permission denied. Allow camera access in your browser settings.",
-        PermissionDeniedError:"Camera permission denied. Allow camera access in your browser settings.",
-        NotFoundError:        "No camera found. Please connect a camera.",
-        DevicesNotFoundError: "No camera found. Please connect a camera.",
-        NotReadableError:     "Camera is in use by another app. Close it and try again.",
-        TrackStartError:      "Camera is in use by another app. Close it and try again.",
-        UnsupportedError:     err.message,
-      };
-      setCameraError(msgs[err.name] ?? "Could not start camera. Check permissions and try again.");
+      // Cleanup any partial stream
+      loopRef.current = false;
+      streamRef.current?.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
+      if (videoRef.current) videoRef.current.srcObject = null;
+
+      setStatus("error");
+      if (err.userFacing) {
+        setErrorMsg(err.message);
+        setErrorHint("");
+      } else {
+        setErrorMsg("Something went wrong. See details below.");
+        setErrorHint(err.message);
+      }
     }
   };
 
-  // ── Stop camera ───────────────────────────────────────────────────────────
-  const stopCamera = () => {
+  // ── stop ──────────────────────────────────────────────────────────────────
+  const stop = () => {
     if (word) addHistory({ type: "detection", original: word, corrected: null });
 
     loopRef.current = false;
     cancelAnimationFrame(rafRef.current);
-
-    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current?.getTracks().forEach(t => t.stop());
     streamRef.current = null;
-
     if (videoRef.current) videoRef.current.srcObject = null;
-
     handsRef.current?.close();
     handsRef.current = null;
 
-    setIsDetecting(false);
+    setStatus("idle");
     setGestureText("—");
     setMeaningText("Show your hand to the camera");
     setConfidence(0);
@@ -276,38 +262,34 @@ const LiveDetectPage = () => {
     lastLetterRef.current = "";
   };
 
-  // ── Cleanup on unmount ────────────────────────────────────────────────────
+  // ── cleanup on unmount ────────────────────────────────────────────────────
   useEffect(() => () => {
     loopRef.current = false;
     cancelAnimationFrame(rafRef.current);
-    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current?.getTracks().forEach(t => t.stop());
     handsRef.current?.close();
   }, []);
 
-  // ── Render ────────────────────────────────────────────────────────────────
+  const isActive  = status === "active";
+  const isLoading = status === "loading";
+  const isError   = status === "error";
+
+  // ─── Render ───────────────────────────────────────────────────────────────
   return (
     <>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Syne+Mono&family=Syne:wght@700;800&family=DM+Sans:wght@300;400;500&display=swap');
-
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
         .ld-root {
           min-height: 100vh;
-          display: flex;
-          align-items: center;
-          justify-content: center;
+          display: flex; align-items: center; justify-content: center;
           background: #060a12;
           font-family: 'DM Sans', sans-serif;
-          padding: 20px;
-          position: relative;
-          overflow: hidden;
+          padding: 20px; position: relative; overflow: hidden;
         }
-
         .ld-root::before {
-          content: '';
-          position: fixed;
-          inset: 0;
+          content: ''; position: fixed; inset: 0;
           background-image:
             linear-gradient(rgba(0,245,255,0.03) 1px, transparent 1px),
             linear-gradient(90deg, rgba(0,245,255,0.03) 1px, transparent 1px);
@@ -315,291 +297,145 @@ const LiveDetectPage = () => {
           animation: gridMove 20s linear infinite;
           pointer-events: none;
         }
-
-        @keyframes gridMove {
-          to { transform: translate(50px, 50px); }
-        }
+        @keyframes gridMove { to { transform: translate(50px, 50px); } }
 
         .ld-container {
-          display: flex;
-          gap: 24px;
-          max-width: 1400px;
-          width: 100%;
-          position: relative;
-          z-index: 1;
+          display: flex; gap: 24px;
+          max-width: 1400px; width: 100%;
+          position: relative; z-index: 1;
         }
+        @media (max-width: 1024px) { .ld-container { flex-direction: column; } }
 
-        @media (max-width: 1024px) {
-          .ld-container { flex-direction: column; }
-        }
-
-        /* ── Video Section ── */
+        /* Video */
         .ld-video-section { flex: 1; display: flex; flex-direction: column; gap: 20px; }
 
         .ld-video-wrap {
-          position: relative;
-          border-radius: 20px;
-          overflow: hidden;
+          position: relative; border-radius: 20px; overflow: hidden;
           background: #0a0f1a;
           border: 2px solid rgba(0,245,255,0.2);
           box-shadow: 0 0 40px rgba(0,245,255,0.15);
         }
-
-        .ld-video-inner {
-          position: relative;
-          padding-bottom: 75%;
-          background: #0a0f1a;
-        }
+        .ld-video-inner { position: relative; padding-bottom: 75%; background: #060a12; }
 
         .ld-video-inner video,
         .ld-video-inner canvas {
-          position: absolute;
-          top: 0; left: 0;
-          width: 100%; height: 100%;
-          object-fit: cover;
+          position: absolute; top: 0; left: 0;
+          width: 100%; height: 100%; object-fit: cover;
         }
-
-        .ld-video-inner video  { z-index: 1; opacity: 0; } /* hidden — canvas mirrors it */
+        .ld-video-inner video  { z-index: 1; opacity: 0; }
         .ld-video-inner canvas { z-index: 2; }
 
-        .ld-camera-status {
-          position: absolute;
-          top: 16px; left: 50%;
-          transform: translateX(-50%);
-          background: rgba(6,10,18,0.85);
-          border: 1px solid rgba(0,245,255,0.3);
-          border-radius: 100px;
-          padding: 6px 18px;
-          font-size: 11px;
-          font-weight: 600;
-          color: #00f5ff;
-          z-index: 3;
-          display: flex;
-          align-items: center;
-          gap: 8px;
+        .ld-placeholder {
+          position: absolute; inset: 0; z-index: 3;
+          display: flex; flex-direction: column;
+          align-items: center; justify-content: center; gap: 12px;
+          color: rgba(0,245,255,0.3);
           font-family: 'Syne Mono', monospace;
-          letter-spacing: 1px;
-          white-space: nowrap;
+          font-size: 12px; letter-spacing: 2px;
         }
+        .ld-placeholder-icon { font-size: 48px; opacity: 0.35; }
+        .ld-placeholder-icon.anim { animation: iconPulse 1.4s ease-in-out infinite; }
+        @keyframes iconPulse { 0%,100%{opacity:.2} 50%{opacity:.6} }
+        .ld-placeholder-step { font-size: 11px; color: rgba(0,245,255,0.5); margin-top: 4px; text-align: center; padding: 0 20px; }
 
-        .ld-status-dot {
-          width: 8px; height: 8px;
-          border-radius: 50%;
-          flex-shrink: 0;
+        .ld-badge {
+          position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+          background: rgba(6,10,18,0.85);
+          border: 1px solid rgba(0,245,255,0.3); border-radius: 100px;
+          padding: 6px 18px; font-size: 11px; font-weight: 600; color: #00f5ff;
+          z-index: 5; display: flex; align-items: center; gap: 8px;
+          font-family: 'Syne Mono', monospace; letter-spacing: 1px; white-space: nowrap;
         }
-        .ld-status-dot.active  { background: #4ade80; animation: blink 2s ease-in-out infinite; }
-        .ld-status-dot.inactive { background: #ef4444; }
+        .ld-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+        .ld-dot.on      { background: #4ade80; animation: blink 2s ease-in-out infinite; }
+        .ld-dot.off     { background: #ef4444; }
+        .ld-dot.loading { background: #f59e0b; animation: blink 0.8s ease-in-out infinite; }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
 
-        @keyframes blink {
-          0%,100% { opacity:1; } 50% { opacity:.4; }
-        }
+        .ld-conf-track { position: absolute; bottom: 0; left: 0; right: 0; height: 4px; background: rgba(255,255,255,0.08); z-index: 4; }
+        .ld-conf-fill  { height: 100%; background: linear-gradient(90deg, #00f5ff, #ff4fa3); transition: width 0.1s linear; border-radius: 0 2px 2px 0; }
 
-        /* Confidence bar at bottom of video */
-        .ld-confidence-bar-wrap {
-          position: absolute;
-          bottom: 0; left: 0; right: 0;
-          height: 4px;
-          background: rgba(255,255,255,0.1);
-          z-index: 4;
-        }
-        .ld-confidence-bar {
-          height: 100%;
-          background: linear-gradient(90deg, #00f5ff, #ff4fa3);
-          transition: width 0.1s linear;
-          border-radius: 0 2px 2px 0;
-        }
-
-        /* ── Control Panel ── */
-        .ld-panel {
-          width: 380px;
-          display: flex;
-          flex-direction: column;
-          gap: 16px;
-        }
-
+        /* Panel */
+        .ld-panel { width: 380px; display: flex; flex-direction: column; gap: 16px; }
         @media (max-width: 1024px) { .ld-panel { width: 100%; } }
 
         .ld-card {
           background: rgba(10,15,26,0.85);
           border: 1px solid rgba(0,245,255,0.15);
-          border-radius: 16px;
-          padding: 20px;
+          border-radius: 16px; padding: 20px;
           backdrop-filter: blur(10px);
         }
-
         .ld-card-title {
-          font-size: 10px;
-          font-weight: 700;
-          letter-spacing: 2px;
-          text-transform: uppercase;
-          color: rgba(0,245,255,0.55);
-          margin-bottom: 14px;
-          font-family: 'Syne Mono', monospace;
+          font-size: 10px; font-weight: 700; letter-spacing: 2px;
+          text-transform: uppercase; color: rgba(0,245,255,0.55);
+          margin-bottom: 14px; font-family: 'Syne Mono', monospace;
         }
 
         .ld-gesture-display { text-align: center; padding: 12px 0; }
-
         .ld-gesture-letter {
-          font-size: 80px;
-          font-weight: 800;
-          font-family: 'Syne', sans-serif;
+          font-size: 80px; font-weight: 800; font-family: 'Syne', sans-serif;
           background: linear-gradient(135deg, #00f5ff, #ff4fa3);
-          -webkit-background-clip: text;
-          -webkit-text-fill-color: transparent;
+          -webkit-background-clip: text; -webkit-text-fill-color: transparent;
           background-clip: text;
-          line-height: 1;
-          margin-bottom: 10px;
-          display: block;
-          transition: transform 0.15s ease;
+          line-height: 1; margin-bottom: 10px; display: block;
         }
+        .ld-gesture-letter.pop { animation: letterPop 0.35s cubic-bezier(.36,.07,.19,.97); }
+        @keyframes letterPop { 0%,100%{transform:scale(1)} 40%{transform:scale(1.25)} }
+        .ld-gesture-meaning { font-size: 13px; color: rgba(255,255,255,0.45); min-height: 20px; }
 
-        .ld-gesture-letter.pulse {
-          animation: letterPop 0.35s cubic-bezier(.36,.07,.19,.97);
-        }
-
-        @keyframes letterPop {
-          0%,100% { transform: scale(1); }
-          40%      { transform: scale(1.25); }
-        }
-
-        .ld-gesture-meaning {
-          font-size: 13px;
-          color: rgba(255,255,255,0.5);
-          font-weight: 400;
-          min-height: 20px;
-        }
-
-        /* Word display */
         .ld-word-display {
-          background: rgba(0,245,255,0.05);
-          border: 1px solid rgba(0,245,255,0.2);
-          border-radius: 12px;
-          padding: 14px 16px;
-          min-height: 58px;
-          font-size: 26px;
-          font-weight: 700;
-          font-family: 'Syne', sans-serif;
-          color: #00f5ff;
-          word-break: break-all;
-          text-align: center;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          letter-spacing: 4px;
+          background: rgba(0,245,255,0.05); border: 1px solid rgba(0,245,255,0.2);
+          border-radius: 12px; padding: 14px 16px; min-height: 58px;
+          font-size: 26px; font-weight: 700; font-family: 'Syne', sans-serif;
+          color: #00f5ff; word-break: break-all; text-align: center;
+          display: flex; align-items: center; justify-content: center; letter-spacing: 4px;
         }
-
-        .ld-word-placeholder {
-          font-size: 12px;
-          letter-spacing: 2px;
-          color: rgba(0,245,255,0.3);
-          font-family: 'Syne Mono', monospace;
-        }
+        .ld-word-ph { font-size: 11px; letter-spacing: 2px; color: rgba(0,245,255,0.3); font-family: 'Syne Mono', monospace; }
 
         .ld-btn-row { display: flex; gap: 8px; margin-top: 12px; }
-
         .ld-btn {
-          flex: 1;
-          padding: 9px;
-          border-radius: 9px;
+          flex: 1; padding: 9px; border-radius: 9px;
           border: 1px solid rgba(255,255,255,0.1);
-          background: rgba(255,255,255,0.04);
-          color: rgba(255,255,255,0.6);
-          font-size: 12px;
-          font-weight: 600;
-          cursor: pointer;
-          transition: all 0.2s;
-          font-family: 'DM Sans', sans-serif;
+          background: rgba(255,255,255,0.04); color: rgba(255,255,255,0.6);
+          font-size: 12px; font-weight: 600;
+          cursor: pointer; transition: all 0.2s; font-family: 'DM Sans', sans-serif;
         }
-
-        .ld-btn:hover {
-          background: rgba(255,255,255,0.09);
-          color: #fff;
-        }
-
+        .ld-btn:hover { background: rgba(255,255,255,0.09); color: #fff; }
         .ld-btn-clear { border-color: rgba(239,68,68,0.3); color: #ef4444; }
         .ld-btn-clear:hover { background: rgba(239,68,68,0.12); border-color: rgba(239,68,68,0.5); }
-
         .ld-btn-space { border-color: rgba(0,245,255,0.2); color: rgba(0,245,255,0.7); }
-        .ld-btn-space:hover { background: rgba(0,245,255,0.1); border-color: rgba(0,245,255,0.4); color: #00f5ff; }
+        .ld-btn-space:hover { background: rgba(0,245,255,0.1); color: #00f5ff; }
 
         .ld-main-btn {
-          width: 100%;
-          padding: 15px;
-          border-radius: 12px;
-          border: none;
-          font-size: 14px;
-          font-weight: 700;
-          cursor: pointer;
-          transition: all 0.25s;
+          width: 100%; padding: 15px; border-radius: 12px; border: none;
+          font-size: 14px; font-weight: 700; cursor: pointer; transition: all 0.25s;
           font-family: 'Syne', sans-serif;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          gap: 10px;
-          letter-spacing: 1px;
+          display: flex; align-items: center; justify-content: center;
+          gap: 10px; letter-spacing: 1px;
         }
-
-        .ld-main-btn.start {
-          background: linear-gradient(135deg, #00f5ff, #00b8d4);
-          color: #060a12;
-          box-shadow: 0 4px 24px rgba(0,245,255,0.35);
-        }
-        .ld-main-btn.start:hover:not(:disabled) {
-          transform: translateY(-2px);
-          box-shadow: 0 8px 32px rgba(0,245,255,0.5);
-        }
-
-        .ld-main-btn.stop {
-          background: linear-gradient(135deg, #ef4444, #b91c1c);
-          color: #fff;
-          box-shadow: 0 4px 24px rgba(239,68,68,0.35);
-        }
-        .ld-main-btn.stop:hover {
-          transform: translateY(-2px);
-          box-shadow: 0 8px 32px rgba(239,68,68,0.5);
-        }
-
+        .ld-main-btn.start { background: linear-gradient(135deg, #00f5ff, #00b8d4); color: #060a12; box-shadow: 0 4px 24px rgba(0,245,255,0.35); }
+        .ld-main-btn.start:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 8px 32px rgba(0,245,255,0.5); }
+        .ld-main-btn.stop  { background: linear-gradient(135deg, #ef4444, #b91c1c); color: #fff; box-shadow: 0 4px 24px rgba(239,68,68,0.35); }
+        .ld-main-btn.stop:hover  { transform: translateY(-2px); box-shadow: 0 8px 32px rgba(239,68,68,0.5); }
         .ld-main-btn:disabled { opacity: 0.55; cursor: not-allowed; transform: none !important; }
 
-        /* Error box */
-        .ld-error-box {
-          background: rgba(239,68,68,0.08);
-          border: 1px solid rgba(239,68,68,0.3);
-          border-radius: 12px;
-          padding: 14px 16px;
-          margin-bottom: 14px;
-          color: #fca5a5;
-          font-size: 13px;
-          line-height: 1.6;
-        }
+        .ld-spinner { width: 16px; height: 16px; border-radius: 50%; border: 2px solid rgba(6,10,18,0.3); border-top-color: #060a12; animation: spin 0.7s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
 
-        .ld-error-title {
-          font-weight: 700;
-          margin-bottom: 6px;
-          font-size: 13px;
-        }
-
-        .ld-dismiss {
-          margin-top: 10px;
-          background: none;
-          border: 1px solid rgba(239,68,68,0.3);
-          border-radius: 7px;
-          color: #fca5a5;
-          padding: 5px 12px;
-          font-size: 12px;
-          cursor: pointer;
-          font-family: 'DM Sans', sans-serif;
-        }
+        .ld-error-box { background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.35); border-radius: 12px; padding: 16px; margin-bottom: 14px; }
+        .ld-error-title { font-weight: 700; font-size: 13px; color: #fca5a5; margin-bottom: 6px; }
+        .ld-error-body  { font-size: 13px; color: #fca5a5; line-height: 1.7; white-space: pre-line; }
+        .ld-error-hint  { font-size: 11px; color: rgba(252,165,165,0.55); margin-top: 8px; font-family: 'Syne Mono', monospace; }
+        .ld-dismiss { margin-top: 10px; background: none; border: 1px solid rgba(239,68,68,0.3); border-radius: 7px; color: #fca5a5; padding: 5px 12px; font-size: 12px; cursor: pointer; font-family: 'DM Sans', sans-serif; }
         .ld-dismiss:hover { background: rgba(239,68,68,0.15); }
 
-        /* Tips */
-        .ld-tips {
-          font-size: 11px;
-          color: rgba(255,255,255,0.3);
-          line-height: 1.8;
-          font-family: 'Syne Mono', monospace;
+        .ld-help {
+          background: rgba(0,245,255,0.03); border: 1px solid rgba(0,245,255,0.1);
+          border-radius: 12px; padding: 16px;
+          font-size: 11px; color: rgba(255,255,255,0.35);
+          line-height: 2; font-family: 'Syne Mono', monospace;
         }
-        .ld-tips span { color: rgba(0,245,255,0.5); }
+        .ld-help b { color: rgba(0,245,255,0.55); }
       `}</style>
 
       <div className="ld-root">
@@ -609,18 +445,26 @@ const LiveDetectPage = () => {
           <div className="ld-video-section">
             <div className="ld-video-wrap">
               <div className="ld-video-inner">
-                {/* video is hidden; canvas shows the mirrored+annotated feed */}
                 <video ref={videoRef} autoPlay playsInline muted />
                 <canvas ref={canvasRef} />
 
-                <div className="ld-camera-status">
-                  <span className={`ld-status-dot ${isDetecting ? "active" : "inactive"}`} />
-                  {isLoading ? "INITIALISING…" : isDetecting ? "CAMERA ACTIVE" : "CAMERA INACTIVE"}
+                {!isActive && (
+                  <div className="ld-placeholder">
+                    <div className={`ld-placeholder-icon ${isLoading ? "anim" : ""}`}>
+                      {isLoading ? "⏳" : isError ? "⚠️" : "📷"}
+                    </div>
+                    <div>{isLoading ? "LOADING" : isError ? "CAMERA ERROR" : "CAMERA INACTIVE"}</div>
+                    {isLoading && <div className="ld-placeholder-step">{loadStep}</div>}
+                  </div>
+                )}
+
+                <div className="ld-badge">
+                  <span className={`ld-dot ${isActive ? "on" : isLoading ? "loading" : "off"}`} />
+                  {isLoading ? "LOADING…" : isActive ? "CAMERA ACTIVE" : "CAMERA INACTIVE"}
                 </div>
 
-                {/* confidence bar */}
-                <div className="ld-confidence-bar-wrap">
-                  <div className="ld-confidence-bar" style={{ width: `${confidence}%` }} />
+                <div className="ld-conf-track">
+                  <div className="ld-conf-fill" style={{ width: `${confidence}%` }} />
                 </div>
               </div>
             </div>
@@ -629,91 +473,56 @@ const LiveDetectPage = () => {
           {/* ── Panel ── */}
           <div className="ld-panel">
 
-            {/* Gesture */}
             <div className="ld-card">
               <div className="ld-card-title">Detected Gesture</div>
               <div className="ld-gesture-display">
-                <span className={`ld-gesture-letter ${pulseActive ? "pulse" : ""}`}>
-                  {gestureText}
-                </span>
+                <span className={`ld-gesture-letter ${pulse ? "pop" : ""}`}>{gestureText}</span>
                 <div className="ld-gesture-meaning">{meaningText}</div>
               </div>
             </div>
 
-            {/* Word */}
             <div className="ld-card">
               <div className="ld-card-title">Generated Word</div>
               <div className="ld-word-display">
-                {word
-                  ? word
-                  : <span className="ld-word-placeholder">START SIGNING</span>
-                }
+                {word ? word : <span className="ld-word-ph">START SIGNING</span>}
               </div>
               <div className="ld-btn-row">
-                <button
-                  className="ld-btn ld-btn-space"
-                  onClick={() => setWord((w) => w + " ")}
-                >
-                  ␣ Space
-                </button>
-                <button
-                  className="ld-btn"
-                  onClick={() => setWord((w) => w.slice(0, -1))}
-                >
-                  ⌫ Delete
-                </button>
-                <button
-                  className="ld-btn ld-btn-clear"
-                  onClick={() => {
-                    if (word) addHistory({ type: "detection", original: word, corrected: null });
-                    setWord("");
-                    lastLetterRef.current = "";
-                    holdCountRef.current  = 0;
-                  }}
-                >
-                  ✕ Clear
-                </button>
+                <button className="ld-btn ld-btn-space" onClick={() => setWord(w => w + " ")}>␣ Space</button>
+                <button className="ld-btn" onClick={() => setWord(w => w.slice(0, -1))}>⌫ Delete</button>
+                <button className="ld-btn ld-btn-clear" onClick={() => {
+                  if (word) addHistory({ type: "detection", original: word, corrected: null });
+                  setWord(""); lastLetterRef.current = ""; holdCountRef.current = 0;
+                }}>✕ Clear</button>
               </div>
             </div>
 
-            {/* Controls */}
             <div className="ld-card">
-              {cameraError && (
+              {isError && (
                 <div className="ld-error-box">
                   <div className="ld-error-title">⚠ Camera Error</div>
-                  {cameraError}
-                  <br />
-                  <button className="ld-dismiss" onClick={() => setCameraError(null)}>
-                    Dismiss
-                  </button>
+                  <div className="ld-error-body">{errorMsg}</div>
+                  {errorHint && <div className="ld-error-hint">Details: {errorHint}</div>}
+                  <button className="ld-dismiss" onClick={() => setStatus("idle")}>Dismiss</button>
                 </div>
               )}
 
-              {!isDetecting ? (
-                <button className="ld-main-btn start" onClick={startCamera} disabled={isLoading}>
-                  {isLoading ? "⏳  Loading Model…" : "▶  Start Detection"}
-                </button>
-              ) : (
-                <button className="ld-main-btn stop" onClick={stopCamera}>
-                  ⏹  Stop Detection
-                </button>
-              )}
+              {!isActive
+                ? <button className="ld-main-btn start" onClick={start} disabled={isLoading}>
+                    {isLoading
+                      ? <><div className="ld-spinner" />{loadStep || "Loading…"}</>
+                      : "▶  Start Detection"}
+                  </button>
+                : <button className="ld-main-btn stop" onClick={stop}>⏹  Stop Detection</button>
+              }
             </div>
 
-            {/* Tips */}
-            <div className="ld-card">
-              <div className="ld-card-title">Quick Tips</div>
-              <div className="ld-tips">
-                <span>A</span> = closed fist &nbsp;|&nbsp;
-                <span>B</span> = all fingers up<br />
-                <span>D</span> = index only, touch middle<br />
-                <span>V</span> = index + middle up<br />
-                <span>L</span> = index up + thumb out<br />
-                <span>Y</span> = pinky + thumb out<br />
-                <br />
-                Hold each sign still for ~½ sec.<br />
-                The bar below the camera fills as confidence grows.
-              </div>
+            <div className="ld-help">
+              <b>Camera not working?</b><br />
+              1. Click 🔒 in address bar → Camera → <b>Allow</b><br />
+              2. Refresh the page and try again<br />
+              3. Close any app using your camera (Zoom, Teams…)<br /><br />
+              <b>Supported signs:</b> A · B · D · I · L · V · W · Y<br />
+              Hold each sign still — the bar fills as confidence builds.
             </div>
 
           </div>
