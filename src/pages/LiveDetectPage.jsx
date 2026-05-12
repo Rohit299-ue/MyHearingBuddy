@@ -34,23 +34,40 @@ const CDN = "https://cdn.jsdelivr.net/npm/@mediapipe";
 const loadScript = (src) => new Promise((resolve, reject) => {
   if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
   const s = document.createElement("script");
-  s.src = src; s.async = true;
-  s.onload = resolve;
-  s.onerror = () => reject(new Error(`Failed to load: ${src}`));
+  s.src = src; 
+  s.async = true;
+  s.crossOrigin = "anonymous";
+  s.onload = () => {
+    console.log(`✓ Loaded: ${src}`);
+    resolve();
+  };
+  s.onerror = () => {
+    console.error(`✗ Failed: ${src}`);
+    reject(new Error(`Failed to load: ${src}`));
+  };
   document.head.appendChild(s);
 });
 
 const loadMediaPipe = async () => {
-  // Load scripts sequentially (they depend on each other)
-  await loadScript(`${CDN}/drawing_utils/drawing_utils.js`);
-  await loadScript(`${CDN}/hands/hands.js`);
+  try {
+    // Load scripts sequentially (they depend on each other)
+    console.log("Loading MediaPipe scripts...");
+    await loadScript(`${CDN}/drawing_utils/drawing_utils.js`);
+    await loadScript(`${CDN}/hands/hands.js`);
 
-  // Wait for Hands global to appear (up to 6 seconds)
-  for (let i = 0; i < 30; i++) {
-    if (window.Hands) return;
-    await new Promise(r => setTimeout(r, 200));
+    // Wait for Hands global to appear (up to 10 seconds)
+    for (let i = 0; i < 50; i++) {
+      if (window.Hands && window.drawConnectors && window.drawLandmarks) {
+        console.log("✓ MediaPipe loaded successfully");
+        return;
+      }
+      await new Promise(r => setTimeout(r, 200));
+    }
+    throw new Error("MediaPipe Hands did not initialize within 10 seconds. Please check your internet connection and try again.");
+  } catch (error) {
+    console.error("MediaPipe loading error:", error);
+    throw error;
   }
-  throw new Error("MediaPipe Hands did not initialize within 6 seconds. Check your network connection.");
 };
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -158,8 +175,15 @@ const LiveDetectPage = () => {
       });
 
       // ── Step 3: Load MediaPipe ────────────────────────────────────────────
-      setLoadStep("Downloading hand-tracking model…");
-      await loadMediaPipe();
+      setLoadStep("Downloading hand-tracking model… (this may take a moment)");
+      try {
+        await loadMediaPipe();
+      } catch (mpError) {
+        throw Object.assign(
+          new Error("Failed to load hand detection model. Please check your internet connection and try again."),
+          { userFacing: true }
+        );
+      }
 
       // ── Step 4: Init Hands ────────────────────────────────────────────────
       setLoadStep("Initialising detector…");
