@@ -207,17 +207,30 @@ const LiveDetectPage = () => {
         }
 
         const ctx = canvas.getContext("2d");
-        canvas.width  = vid.videoWidth  || 640;
-        canvas.height = vid.videoHeight || 480;
+        
+        // Set canvas size to match video
+        if (canvas.width !== vid.videoWidth || canvas.height !== vid.videoHeight) {
+          canvas.width  = vid.videoWidth  || 640;
+          canvas.height = vid.videoHeight || 480;
+          console.log(`Canvas resized to: ${canvas.width}x${canvas.height}`);
+        }
 
-        console.log(`Drawing frame: ${canvas.width}x${canvas.height}`);
-
-        ctx.save();
+        // Clear canvas
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-        // Mirror the feed so it feels like a selfie camera
+        
+        // Draw video frame (mirrored for selfie effect)
+        ctx.save();
         ctx.translate(canvas.width, 0);
         ctx.scale(-1, 1);
-        ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+        
+        // Draw the actual video frame
+        if (results.image) {
+          ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+        } else {
+          // Fallback: draw directly from video element
+          ctx.drawImage(vid, 0, 0, canvas.width, canvas.height);
+        }
+        
         ctx.restore();
 
         if (results.multiHandLandmarks?.length) {
@@ -251,6 +264,21 @@ const LiveDetectPage = () => {
       loopRef.current  = true;
       setStatus("active");
       setLoadStep("");
+      
+      // Test: Draw something on canvas to verify it's working
+      const testCanvas = canvasRef.current;
+      if (testCanvas) {
+        const testCtx = testCanvas.getContext("2d");
+        testCanvas.width = 640;
+        testCanvas.height = 480;
+        testCtx.fillStyle = "rgba(0, 245, 255, 0.3)";
+        testCtx.fillRect(10, 10, 100, 50);
+        testCtx.fillStyle = "#00f5ff";
+        testCtx.font = "20px Arial";
+        testCtx.fillText("Camera Active", 20, 40);
+        console.log("✓ Canvas test draw successful");
+      }
+      
       runLoop();
 
     } catch (err) {
@@ -351,8 +379,8 @@ const LiveDetectPage = () => {
           position: absolute; top: 0; left: 0;
           width: 100%; height: 100%; object-fit: cover;
         }
-        .ld-video-inner video  { z-index: 1; opacity: 0; }
-        .ld-video-inner canvas { z-index: 2; background: #060a12; }
+        .ld-video-inner video  { z-index: 1; }
+        .ld-video-inner canvas { z-index: 2; background: transparent; }
 
         .ld-placeholder {
           position: absolute; inset: 0; z-index: 3;
