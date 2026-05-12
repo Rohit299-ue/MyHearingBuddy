@@ -16,6 +16,8 @@ const LiveDetectPage = () => {
   const [meaningText, setMeaningText] = useState("-");
   const [word, setWord] = useState("");
   const [pulseActive, setPulseActive] = useState(false);
+  const [cameraError, setCameraError] = useState(null);
+  const [isLoading, setIsLoading] = useState(false);
 
   const lastLetterRef = useRef("");
 
@@ -54,60 +56,104 @@ const LiveDetectPage = () => {
   };
 
   const startCamera = async () => {
-    const hands = new Hands({
-      locateFile: (file) =>
-        `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
-    });
+    try {
+      setIsLoading(true);
+      setCameraError(null);
 
-    hands.setOptions({
-      maxNumHands: 1,
-      modelComplexity: 1,
-      minDetectionConfidence: 0.7,
-      minTrackingConfidence: 0.7,
-    });
-
-    hands.onResults((results) => {
-      const canvas = canvasRef.current;
-      const ctx = canvas.getContext("2d");
-      canvas.width = videoRef.current.videoWidth;
-      canvas.height = videoRef.current.videoHeight;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
-
-      if (results.multiHandLandmarks) {
-        for (const landmarks of results.multiHandLandmarks) {
-          drawingUtils.drawConnectors(ctx, landmarks, Hands.HAND_CONNECTIONS, {
-            color: "#00f5ff",
-            lineWidth: 2,
-          });
-          drawingUtils.drawLandmarks(ctx, landmarks, {
-            color: "#ff4fa3",
-            lineWidth: 1,
-            radius: 3,
-          });
-          const letter = detectGesture(landmarks);
-          if (letter) {
-            setGestureText(letter);
-            setMeaningText(getMeaning(letter));
-            addToWord(letter);
-          }
-        }
-      } else {
-        setGestureText("-");
-        setMeaningText("-");
+      // Check if browser supports getUserMedia
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("Camera not supported in this browser. Please use Chrome, Firefox, or Safari.");
       }
-    });
 
-    cameraRef.current = new Camera(videoRef.current, {
-      onFrame: async () => {
-        await hands.send({ image: videoRef.current });
-      },
-      width: 640,
-      height: 480,
-    });
+      // Request camera permission first
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { 
+          width: 640, 
+          height: 480,
+          facingMode: "user"
+        } 
+      });
 
-    cameraRef.current.start();
-    setIsDetecting(true);
+      // Set video source
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
+
+      const hands = new Hands({
+        locateFile: (file) =>
+          `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
+      });
+
+      hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.7,
+        minTrackingConfidence: 0.7,
+      });
+
+      hands.onResults((results) => {
+        const canvas = canvasRef.current;
+        const ctx = canvas.getContext("2d");
+        canvas.width = videoRef.current.videoWidth;
+        canvas.height = videoRef.current.videoHeight;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+
+        if (results.multiHandLandmarks) {
+          for (const landmarks of results.multiHandLandmarks) {
+            drawingUtils.drawConnectors(ctx, landmarks, Hands.HAND_CONNECTIONS, {
+              color: "#00f5ff",
+              lineWidth: 2,
+            });
+            drawingUtils.drawLandmarks(ctx, landmarks, {
+              color: "#ff4fa3",
+              lineWidth: 1,
+              radius: 3,
+            });
+            const letter = detectGesture(landmarks);
+            if (letter) {
+              setGestureText(letter);
+              setMeaningText(getMeaning(letter));
+              addToWord(letter);
+            }
+          }
+        } else {
+          setGestureText("-");
+          setMeaningText("-");
+        }
+      });
+
+      cameraRef.current = new Camera(videoRef.current, {
+        onFrame: async () => {
+          await hands.send({ image: videoRef.current });
+        },
+        width: 640,
+        height: 480,
+      });
+
+      await cameraRef.current.start();
+      setIsDetecting(true);
+      setIsLoading(false);
+    } catch (error) {
+      console.error("Camera error:", error);
+      setIsLoading(false);
+      
+      let errorMessage = "Failed to access camera. ";
+      
+      if (error.name === "NotAllowedError" || error.name === "PermissionDeniedError") {
+        errorMessage += "Please allow camera access in your browser settings.";
+      } else if (error.name === "NotFoundError" || error.name === "DevicesNotFoundError") {
+        errorMessage += "No camera found. Please connect a camera.";
+      } else if (error.name === "NotReadableError" || error.name === "TrackStartError") {
+        errorMessage += "Camera is already in use by another application.";
+      } else if (error.message.includes("not supported")) {
+        errorMessage = error.message;
+      } else {
+        errorMessage += "Please check your camera permissions and try again.";
+      }
+      
+      setCameraError(errorMessage);
+    }
   };
 
   const stopCamera = () => {
@@ -660,9 +706,46 @@ const LiveDetectPage = () => {
 
             {/* Main CTA */}
             <div className="ld-control-wrap">
+              {cameraError && (
+                <div style={{
+                  background: 'rgba(239, 68, 68, 0.1)',
+                  border: '1px solid rgba(239, 68, 68, 0.3)',
+                  borderRadius: '12px',
+                  padding: '16px',
+                  marginBottom: '16px',
+                  color: '#fca5a5',
+                  fontSize: '14px',
+                  lineHeight: '1.5',
+                  textAlign: 'center'
+                }}>
+                  <div style={{ fontWeight: 600, marginBottom: '8px' }}>⚠️ Camera Error</div>
+                  <div>{cameraError}</div>
+                  <button 
+                    onClick={() => setCameraError(null)}
+                    style={{
+                      marginTop: '12px',
+                      padding: '8px 16px',
+                      background: 'rgba(239, 68, 68, 0.2)',
+                      border: '1px solid rgba(239, 68, 68, 0.4)',
+                      borderRadius: '8px',
+                      color: '#fca5a5',
+                      cursor: 'pointer',
+                      fontSize: '13px',
+                      fontWeight: 500
+                    }}
+                  >
+                    Try Again
+                  </button>
+                </div>
+              )}
               {!isDetecting ? (
-                <button className="ld-main-btn start" onClick={startCamera}>
-                  <span>▶</span> Start Detection
+                <button 
+                  className="ld-main-btn start" 
+                  onClick={startCamera}
+                  disabled={isLoading}
+                  style={{ opacity: isLoading ? 0.6 : 1 }}
+                >
+                  <span>{isLoading ? '⏳' : '▶'}</span> {isLoading ? 'Loading...' : 'Start Detection'}
                 </button>
               ) : (
                 <button className="ld-main-btn stop" onClick={stopCamera}>
