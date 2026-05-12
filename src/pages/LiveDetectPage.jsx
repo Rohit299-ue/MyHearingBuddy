@@ -29,36 +29,84 @@ const MEANINGS = {
 };
 
 // ─── Load MediaPipe scripts dynamically ──────────────────────────────────────
-const CDN = "https://cdn.jsdelivr.net/npm/@mediapipe";
+const CDN_PRIMARY = "https://cdn.jsdelivr.net/npm/@mediapipe";
+const CDN_FALLBACK = "https://unpkg.com/@mediapipe";
 
-const loadScript = (src) => new Promise((resolve, reject) => {
-  if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+const loadScript = (src, fallbackSrc = null) => new Promise((resolve, reject) => {
+  const existingScript = document.querySelector(`script[src="${src}"]`) || 
+                         (fallbackSrc && document.querySelector(`script[src="${fallbackSrc}"]`));
+  if (existingScript) { 
+    console.log(`✓ Script already loaded: ${src}`);
+    resolve(); 
+    return; 
+  }
+  
   const s = document.createElement("script");
   s.src = src; 
   s.async = true;
   s.crossOrigin = "anonymous";
+  
   s.onload = () => {
     console.log(`✓ Loaded: ${src}`);
     resolve();
   };
+  
   s.onerror = () => {
     console.error(`✗ Failed: ${src}`);
-    reject(new Error(`Failed to load: ${src}`));
+    if (fallbackSrc) {
+      console.log(`Trying fallback CDN: ${fallbackSrc}`);
+      document.head.removeChild(s);
+      const fallback = document.createElement("script");
+      fallback.src = fallbackSrc;
+      fallback.async = true;
+      fallback.crossOrigin = "anonymous";
+      fallback.onload = () => {
+        console.log(`✓ Loaded from fallback: ${fallbackSrc}`);
+        resolve();
+      };
+      fallback.onerror = () => {
+        console.error(`✗ Fallback also failed: ${fallbackSrc}`);
+        reject(new Error(`Failed to load from both CDNs: ${src}`));
+      };
+      document.head.appendChild(fallback);
+    } else {
+      reject(new Error(`Failed to load: ${src}`));
+    }
   };
+  
   document.head.appendChild(s);
 });
 
 const loadMediaPipe = async () => {
   try {
-    // Load scripts sequentially (they depend on each other)
     console.log("Loading MediaPipe scripts...");
-    await loadScript(`${CDN}/drawing_utils/drawing_utils.js`);
-    await loadScript(`${CDN}/hands/hands.js`);
+    
+    // Try primary CDN with fallback
+    await loadScript(
+      `${CDN_PRIMARY}/drawing_utils@0.3.1620248257/drawing_utils.js`,
+      `${CDN_FALLBACK}/drawing_utils@0.3.1620248257/drawing_utils.js`
+    );
+    
+    await loadScript(
+      `${CDN_PRIMARY}/hands@0.4.1646424915/hands.js`,
+      `${CDN_FALLBACK}/hands@0.4.1646424915/hands.js`
+    );
 
-    // Wait for Hands global to appear (up to 10 seconds)
+    // Wait for globals to appear (up to 10 seconds)
+    console.log("Waiting for MediaPipe globals...");
     for (let i = 0; i < 50; i++) {
-      if (window.Hands && window.drawConnectors && window.drawLandmarks) {
-        console.log("✓ MediaPipe loaded successfully");
+      const hasHands = typeof window.Hands !== 'undefined';
+      const hasDrawConnectors = typeof window.drawConnectors !== 'undefined';
+      const hasDrawLandmarks = typeof window.drawLandmarks !== 'undefined';
+      const hasHandConnections = typeof window.HAND_CONNECTIONS !== 'undefined';
+      
+      console.log(`Check ${i + 1}/50:`, { hasHands, hasDrawConnectors, hasDrawLandmarks, hasHandConnections });
+      
+      if (hasHands) {
+        console.log("✓ MediaPipe Hands loaded successfully");
+        if (!hasDrawConnectors || !hasDrawLandmarks) {
+          console.warn("⚠ Drawing utilities not available, will use manual fallback");
+        }
         return;
       }
       await new Promise(r => setTimeout(r, 200));
@@ -199,7 +247,7 @@ const LiveDetectPage = () => {
       // ── Step 4: Init Hands ────────────────────────────────────────────────
       setLoadStep("Initialising detector…");
       const hands = new window.Hands({
-        locateFile: (f) => `${CDN}/hands/${f}`,
+        locateFile: (f) => `${CDN_PRIMARY}/hands@0.4.1646424915/${f}`,
       });
 
       hands.setOptions({
@@ -212,7 +260,8 @@ const LiveDetectPage = () => {
       hands.onResults((results) => {
         console.log("onResults called", { 
           hasImage: !!results.image, 
-          hasLandmarks: !!results.multiHandLandmarks?.length 
+          hasLandmarks: !!results.multiHandLandmarks?.length,
+          landmarkCount: results.multiHandLandmarks?.length || 0
         });
         
         const canvas = canvasRef.current;
@@ -250,47 +299,81 @@ const LiveDetectPage = () => {
         ctx.restore();
 
         if (results.multiHandLandmarks?.length) {
-          console.log(`Drawing ${results.multiHandLandmarks.length} hand(s)`);
+          console.log(`✓ Drawing ${results.multiHandLandmarks.length} hand(s)`);
+          
           for (const lm of results.multiHandLandmarks) {
             // Draw landmarks mirrored
             ctx.save();
             ctx.translate(canvas.width, 0);
             ctx.scale(-1, 1);
             
-            // Draw hand connections
-            if (window.drawConnectors && window.HAND_CONNECTIONS) {
-              window.drawConnectors(ctx, lm, window.HAND_CONNECTIONS, { color: "#00f5ff", lineWidth: 2 });
+            // Check if MediaPipe drawing utilities are available
+            const hasDrawingUtils = typeof window.drawConnectors === 'function' && 
+                                   typeof window.drawLandmarks === 'function' &&
+                                   typeof window.HAND_CONNECTIONS !== 'undefined';
+            
+            console.log("Drawing utilities available:", hasDrawingUtils);
+            
+            if (hasDrawingUtils) {
+              // Use MediaPipe drawing utilities
+              try {
+                window.drawConnectors(ctx, lm, window.HAND_CONNECTIONS, { 
+                  color: "#00f5ff", 
+                  lineWidth: 2 
+                });
+                window.drawLandmarks(ctx, lm, { 
+                  color: "#ff4fa3", 
+                  lineWidth: 1, 
+                  radius: 4 
+                });
+                console.log("✓ Drew using MediaPipe utilities");
+              } catch (err) {
+                console.error("Error using MediaPipe drawing utilities:", err);
+                // Fall through to manual drawing
+              }
             } else {
-              console.warn("drawConnectors or HAND_CONNECTIONS not available");
-              // Manual fallback: draw simple lines between landmarks
+              // Manual fallback drawing
+              console.log("Using manual fallback drawing");
+              
+              // Draw connections (hand skeleton)
               ctx.strokeStyle = "#00f5ff";
               ctx.lineWidth = 2;
-              // Draw palm
-              const palmIndices = [[0,1],[1,2],[2,5],[5,9],[9,13],[13,17],[17,0]];
-              palmIndices.forEach(([a,b]) => {
-                ctx.beginPath();
-                ctx.moveTo(lm[a].x * canvas.width, lm[a].y * canvas.height);
-                ctx.lineTo(lm[b].x * canvas.width, lm[b].y * canvas.height);
-                ctx.stroke();
+              
+              // Hand connection indices (MediaPipe hand model)
+              const connections = [
+                [0,1],[1,2],[2,3],[3,4],        // Thumb
+                [0,5],[5,6],[6,7],[7,8],        // Index
+                [0,9],[9,10],[10,11],[11,12],   // Middle
+                [0,13],[13,14],[14,15],[15,16], // Ring
+                [0,17],[17,18],[18,19],[19,20], // Pinky
+                [5,9],[9,13],[13,17]            // Palm
+              ];
+              
+              connections.forEach(([a, b]) => {
+                if (lm[a] && lm[b]) {
+                  ctx.beginPath();
+                  ctx.moveTo(lm[a].x * canvas.width, lm[a].y * canvas.height);
+                  ctx.lineTo(lm[b].x * canvas.width, lm[b].y * canvas.height);
+                  ctx.stroke();
+                }
               });
-            }
-            
-            // Draw landmarks
-            if (window.drawLandmarks) {
-              window.drawLandmarks(ctx, lm, { color: "#ff4fa3", lineWidth: 1, radius: 4 });
-            } else {
-              console.warn("drawLandmarks not available");
-              // Manual fallback: draw circles for each landmark
+              
+              // Draw landmark points
               ctx.fillStyle = "#ff4fa3";
-              lm.forEach(point => {
-                ctx.beginPath();
-                ctx.arc(point.x * canvas.width, point.y * canvas.height, 4, 0, 2 * Math.PI);
-                ctx.fill();
+              lm.forEach((point, idx) => {
+                if (point) {
+                  ctx.beginPath();
+                  ctx.arc(point.x * canvas.width, point.y * canvas.height, 4, 0, 2 * Math.PI);
+                  ctx.fill();
+                }
               });
+              
+              console.log("✓ Drew using manual fallback");
             }
             
             ctx.restore();
 
+            // Detect gesture
             const letter = detectGesture(lm);
             console.log(`Detected gesture: ${letter || 'none'}`);
             setGestureText(letter || "—");
@@ -298,6 +381,7 @@ const LiveDetectPage = () => {
             tryAddLetter(letter);
           }
         } else {
+          console.log("No hands detected in frame");
           setGestureText("—");
           setMeaningText("Show your hand to the camera");
           setConfidence(0);
