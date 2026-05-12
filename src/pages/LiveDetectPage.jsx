@@ -112,11 +112,22 @@ const LiveDetectPage = () => {
 
   // ── detection loop ────────────────────────────────────────────────────────
   const runLoop = useCallback(() => {
-    if (!loopRef.current) return;
+    if (!loopRef.current) {
+      console.log("Loop stopped");
+      return;
+    }
     const video = videoRef.current;
     const hands = handsRef.current;
     if (video && hands && video.readyState >= 2) {
-      hands.send({ image: video }).catch(() => {});
+      hands.send({ image: video }).catch((err) => {
+        console.error("Error sending frame to MediaPipe:", err);
+      });
+    } else {
+      console.warn("Video or hands not ready:", { 
+        hasVideo: !!video, 
+        hasHands: !!hands, 
+        readyState: video?.readyState 
+      });
     }
     rafRef.current = requestAnimationFrame(() => setTimeout(runLoop, 33));
   }, []);
@@ -199,6 +210,11 @@ const LiveDetectPage = () => {
       });
 
       hands.onResults((results) => {
+        console.log("onResults called", { 
+          hasImage: !!results.image, 
+          hasLandmarks: !!results.multiHandLandmarks?.length 
+        });
+        
         const canvas = canvasRef.current;
         const vid    = videoRef.current;
         if (!canvas || !vid) {
@@ -234,6 +250,7 @@ const LiveDetectPage = () => {
         ctx.restore();
 
         if (results.multiHandLandmarks?.length) {
+          console.log(`Drawing ${results.multiHandLandmarks.length} hand(s)`);
           for (const lm of results.multiHandLandmarks) {
             // Draw landmarks mirrored
             ctx.save();
@@ -241,9 +258,13 @@ const LiveDetectPage = () => {
             ctx.scale(-1, 1);
             if (window.drawConnectors) {
               window.drawConnectors(ctx, lm, window.HAND_CONNECTIONS, { color: "#00f5ff", lineWidth: 2 });
+            } else {
+              console.warn("drawConnectors not available");
             }
             if (window.drawLandmarks) {
               window.drawLandmarks(ctx, lm, { color: "#ff4fa3", lineWidth: 1, radius: 4 });
+            } else {
+              console.warn("drawLandmarks not available");
             }
             ctx.restore();
 
